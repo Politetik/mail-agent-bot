@@ -114,3 +114,24 @@ def test_contacts_are_answered_without_llm(tmp_path):
         assert llm.calls == 0
     finally:
         store.close()
+
+def test_answer_exposes_markdown_for_rendering(tmp_path):
+    from app.telegram_format import format_for_telegram
+
+    cfg = make_cfg(tmp_path)
+    store = open_store(tmp_path / "md.db")
+    try:
+        asyncio.run(seed_store(store))
+        llm = FakeLlm(answer="## Итоги\n\n**Договор № 45/2025** — [ссылка](https://example.com)")
+        result = asyncio.run(answer_question(store, cfg, llm, "Что по договору?"))
+
+        assert result["used_llm"] is True
+        assert "**Договор" in result["markdown"], "markdown должен остаться сырым"
+        assert result["sources_html"].startswith("<i>Источники:</i>")
+
+        chunks = format_for_telegram(result["markdown"])
+        assert any("<b>Договор № 45/2025</b>" in chunk for chunk in chunks)
+        assert any("<a href=\"https://example.com\">ссылка</a>" in chunk for chunk in chunks)
+        assert all("<b>" not in result["sources_html"] for _ in [0])
+    finally:
+        store.close()

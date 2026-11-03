@@ -30,6 +30,7 @@ from .config import describe_config
 from .patterns import format_phone
 from .stt import SttError, transcribe
 from .sync import run_sync
+from .telegram_format import format_for_telegram
 from .util import (
     chunk_text,
     escape_html,
@@ -184,6 +185,23 @@ class BotRunner:
                     raise
                 logger.warning("HTML не распарсился, отправляю как текст")
                 await self.bot.send_message(chat_id, strip_html(part), reply_markup=reply_markup)
+
+    async def _send_parts(self, chat_id: int, parts: list[str]) -> None:
+        """Отправляет заранее подготовленные HTML-фрагменты (уже ≤ лимита)."""
+        for part in parts:
+            if not part or not part.strip():
+                continue
+            try:
+                await self.bot.send_message(
+                    chat_id,
+                    part,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                )
+            except TelegramBadRequest as error:
+                if "entit" not in str(error).lower():
+                    raise
+                logger.warning("HTML не распарсился, отправляю как текст")
+                await self.bot.send_message(chat_id, strip_html(part))
 
     async def notify(self, text: str) -> None:
         if not self.cfg.telegram.allowed_chat_ids:
@@ -426,10 +444,21 @@ class BotRunner:
         try:
             await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
             result = await answer_question(self.store, self.cfg, self.llm, question)
-            text = result["text"]
+
+            parts: list[str] = []
+            if result.get("markdown"):
+                # Ответ модели рендерим в безопасный HTML; наши теги не трогаем.
+                parts.extend(format_for_telegram(result["markdown"]))
+                if result.get("sources_html"):
+                    parts.append(result["sources_html"])
+            else:
+                parts.append(result["text"])
+
             if result.get("email_ids"):
-                text += f"\n\n<i>Писем в ответе: {len(result['email_ids'])}. Детали: /show {result['email_ids'][0]}</i>"
-            await self._send(chat_id, text)
+                parts.append(
+                    f"<i>Писем в ответе: {len(result['email_ids'])}. Детали: /show {result['email_ids'][0]}</i>"
+                )
+            await self._send_parts(chat_id, parts)
         except Exception as error:  # noqa: BLE001 - пользователь должен увидеть причину
             logger.error("Ошибка обработки вопроса: %s", error)
             await self._send(chat_id, f"❌ Ошибка: {escape_html(str(error))}")

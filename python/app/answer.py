@@ -504,6 +504,10 @@ async def answer_with_llm(store, cfg, llm, question: str, intent: str) -> dict:
     )
     return {
         "text": f"{answer}\n\n<i>Источники:</i>\n{escape_html(sources)}",
+        # markdown отдаём отдельно: бот отрендерит его в безопасный HTML,
+        # а наши собственные теги не будут экранированы.
+        "markdown": answer,
+        "sources_html": f"<i>Источники:</i>\n{escape_html(sources)}",
         "email_ids": [email["id"] for email in emails],
         "used_llm": True,
     }
