@@ -13,12 +13,11 @@ def _data(markup) -> list[str]:
 
 def test_main_keyboard_is_compact_and_routed():
     rows = BUTTON_ROUTES
-    assert len(rows) == 6
+    assert len(rows) == 5
     assert rows["📥 Проверить почту"] == "/sync"
     assert rows["📊 Сводка"] == "/digest"
     assert rows["📌 Что висит"] == "/tasks"
     assert rows["📇 Контакты"] == "/contacts"
-    assert rows["🎤 Голос"] == "/voice"
     assert rows["⚙️ Ещё"] == "/more"
 
 

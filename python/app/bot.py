@@ -75,7 +75,6 @@ HELP_TEXT = "\n".join(
         "• /tasks — что висит и ждёт ответа",
         "• /done 12 — закрыть обязательство из /tasks",
         "• /more — договоры, статус, помощь (кнопка «⚙️ Ещё»)",
-        "• 🎤 Голос — как записать голосовой вопрос",
         "• /status — состояние подключений и базы",
         "• /show 12 — показать письмо по номеру",
         "",
@@ -419,8 +418,6 @@ class BotRunner:
                 await self.cmd_status(message)
             elif route == "/more":
                 await self.show_hub(message.chat.id)
-            elif route == "/voice":
-                await self.cmd_voice(message)
             return
         await self.answer_question(message.chat.id, text)
 
@@ -433,18 +430,6 @@ class BotRunner:
 
     async def cmd_more(self, message: Message) -> None:
         await self.show_hub(message.chat.id)
-
-    async def cmd_voice(self, message: Message) -> None:
-        await self._send(
-            message.chat.id,
-            "🎤 <b>Голосом</b>\n\n"
-            "Нажмите и удерживайте микрофон в поле ввода, скажите фразу и отпустите — "
-            "я распознаю и отвечу сразу.\n\n"
-            "Примеры: «проверь почту», «что висит», «какой телефон у Соловьёва».\n\n"
-            "<i>Открыть микрофон программно бот не может: это ограничение Telegram — "
-            "запись запускает только клиент. Поэтому кнопка здесь — подсказка.</i>",
-            reply_markup=KEYBOARD,
-        )
 
     async def _preload_stt(self) -> None:
         if not self.cfg.has.stt or str(self.cfg.stt.provider).lower() != "local":
@@ -700,7 +685,6 @@ class BotRunner:
         router.message.register(self.cmd_show, Command("show"))
         router.message.register(self.cmd_done, Command("done"))
         router.message.register(self.cmd_more, Command("more"))
-        router.message.register(self.cmd_voice, Command("voice"))
         router.message.register(self.cmd_ask, Command("ask"))
         router.message.register(self.handle_voice, F.voice | F.audio | F.video_note)
         router.message.register(self.handle_text, F.text)

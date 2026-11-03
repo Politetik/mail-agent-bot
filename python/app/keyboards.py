@@ -19,7 +19,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📥 Проверить почту"), KeyboardButton(text="📊 Сводка")],
         [KeyboardButton(text="📌 Что висит"), KeyboardButton(text="📇 Контакты")],
-        [KeyboardButton(text="🎤 Голос"), KeyboardButton(text="⚙️ Ещё")],
+        [KeyboardButton(text="⚙️ Ещё")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -32,7 +32,6 @@ BUTTON_ROUTES = {
     "📊 Сводка": "/digest",
     "📌 Что висит": "/tasks",
     "📇 Контакты": "/contacts",
-    "🎤 Голос": "/voice",
     "⚙️ Ещё": "/more",
 }
 
