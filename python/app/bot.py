@@ -449,8 +449,8 @@ class BotRunner:
         if not self.cfg.has.stt:
             await self._send(
                 chat_id,
-                "🎤 Распознавание речи отключено.\n\n"
-                "Включите локальный Whisper: <code>STT_PROVIDER=local</code> в <code>.env</code>.",
+                "🎤 Голосовые сообщения пока отключены.\n\n"
+                "Напишите вопрос текстом — отвечу так же быстро.",
             )
             return
 
