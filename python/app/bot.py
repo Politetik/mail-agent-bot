@@ -10,13 +10,11 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     LinkPreviewOptions,
     Message,
-    ReplyKeyboardMarkup,
 )
 
 from .answer import (
@@ -29,6 +27,15 @@ from .answer import (
     status_label,
 )
 from .config import describe_config
+from .keyboards import (
+    BUTTON_ROUTES,
+    MAIN_KEYBOARD as KEYBOARD,
+    confirm_done_keyboard,
+    digest_keyboard,
+    email_keyboard,
+    hub_keyboard,
+    tasks_keyboard,
+)
 from .patterns import format_phone
 from .stt import SttError, transcribe
 from .sync import run_sync
@@ -44,24 +51,17 @@ from .util import (
     truncate,
 )
 
-KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📥 Проверить почту"), KeyboardButton(text="📊 Сводка")],
-        [KeyboardButton(text="📇 Контакты"), KeyboardButton(text="📄 Договоры")],
-        [KeyboardButton(text="📌 Задачи"), KeyboardButton(text="⚙️ Статус")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
-
-BUTTON_ROUTES = {
-    "📥 Проверить почту": "/sync",
-    "📊 Сводка": "/digest",
-    "📇 Контакты": "/contacts",
-    "📄 Договоры": "/contracts",
-    "📌 Задачи": "/tasks",
-    "⚙️ Статус": "/status",
-}
+BOT_COMMANDS = [
+    BotCommand(command="sync", description="Проверить почту"),
+    BotCommand(command="digest", description="Сводка за N дней"),
+    BotCommand(command="tasks", description="Что висит: обязательства и треды"),
+    BotCommand(command="contacts", description="Контакты с телефонами"),
+    BotCommand(command="contracts", description="Реестр договоров"),
+    BotCommand(command="show", description="Письмо по номеру"),
+    BotCommand(command="done", description="Закрыть обязательство"),
+    BotCommand(command="status", description="Состояние подключений"),
+    BotCommand(command="help", description="Справка"),
+]
 
 HELP_TEXT = "\n".join(
     [
@@ -73,6 +73,7 @@ HELP_TEXT = "\n".join(
         "• /contracts — реестр договоров",
         "• /tasks — что висит и ждёт ответа",
         "• /done 12 — закрыть обязательство из /tasks",
+        "• /more — договоры, статус, помощь (кнопка «⚙️ Ещё»)",
         "• /status — состояние подключений и базы",
         "• /show 12 — показать письмо по номеру",
         "",
@@ -155,14 +156,19 @@ class Progress:
         except TelegramBadRequest as error:
             logger.debug("editMessageText: %s", error)
 
-    async def finish(self, text: str) -> None:
+    async def finish(self, text: str, reply_markup=None) -> None:
         if not self.message_id:
-            await self.bot.send_message(self.chat_id, text)
+            await self.bot.send_message(self.chat_id, text, reply_markup=reply_markup)
             return
         try:
-            await self.bot.edit_message_text(text=text, chat_id=self.chat_id, message_id=self.message_id)
+            await self.bot.edit_message_text(
+                text=text,
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+                reply_markup=reply_markup,
+            )
         except TelegramBadRequest:
-            await self.bot.send_message(self.chat_id, text)
+            await self.bot.send_message(self.chat_id, text, reply_markup=reply_markup)
 
 
 class BotRunner:
@@ -312,7 +318,7 @@ class BotRunner:
                 lines.extend(
                     ["", "⚠️ ИИ-ключ не задан, работает разбор по правилам. Подробные ответы — с <code>LLM_API_KEY</code>."]
                 )
-            await progress.finish("\n".join(lines))
+            await progress.finish("\n".join(lines), reply_markup=digest_keyboard(30))
         except Exception as error:  # noqa: BLE001 - показываем пользователю причину
             logger.error("Синхронизация не удалась: %s", error)
             await progress.finish(f"❌ Не удалось прочитать почту.\n\n{escape_html(str(error))}")
@@ -323,7 +329,7 @@ class BotRunner:
         except (TypeError, ValueError):
             days = 7
         digest = build_digest(self.store, days=days, follow_up_days=self.cfg.agent.follow_up_days)
-        await self._send(message.chat.id, digest["text"])
+        await self._send(message.chat.id, digest["text"], reply_markup=digest_keyboard(days))
 
     async def cmd_contacts(self, message: Message, command: CommandObject) -> None:
         result = answer_contacts(self.store, question=command.args or "")
@@ -333,9 +339,11 @@ class BotRunner:
         await self._send(message.chat.id, answer_contracts(self.store)["text"])
 
     async def cmd_tasks(self, message: Message) -> None:
+        result = answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)
         await self._send(
             message.chat.id,
-            answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)["text"],
+            result["text"],
+            reply_markup=tasks_keyboard(result.get("items") or []),
         )
 
     async def cmd_done(self, message: Message, command: CommandObject) -> None:
@@ -382,7 +390,7 @@ class BotRunner:
         if email.get("addresses"):
             lines.append(f"📍 {escape_html(' | '.join(email['addresses']))}")
         lines.extend(["", "<b>Текст</b>", escape_html(truncate(email.get("body_text") or "", 2500))])
-        await self._send(chat_id, "\n".join(lines))
+        await self._send(chat_id, "\n".join(lines), reply_markup=email_keyboard(email["id"]))
 
     async def cmd_ask(self, message: Message, command: CommandObject) -> None:
         question = (command.args or "").strip()
@@ -407,8 +415,20 @@ class BotRunner:
                 await self.cmd_tasks(message)
             elif route == "/status":
                 await self.cmd_status(message)
+            elif route == "/more":
+                await self.show_hub(message.chat.id)
             return
         await self.answer_question(message.chat.id, text)
+
+    async def show_hub(self, chat_id: int) -> None:
+        await self._send(
+            chat_id,
+            "⚙️ <b>Ещё</b>\n\nРедкие разделы — чтобы не занимать основную панель.",
+            reply_markup=hub_keyboard(),
+        )
+
+    async def cmd_more(self, message: Message) -> None:
+        await self.show_hub(message.chat.id)
 
     async def handle_voice(self, message: Message) -> None:
         chat_id = message.chat.id
@@ -470,16 +490,20 @@ class BotRunner:
             except (TypeError, ValueError):
                 days = 7
             digest = build_digest(self.store, days=days, follow_up_days=self.cfg.agent.follow_up_days)
-            await self._send(chat_id, digest["text"])
+            await self._send(chat_id, digest["text"], reply_markup=digest_keyboard(days))
         elif name == "/tasks":
+            result = answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)
             await self._send(
                 chat_id,
-                answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)["text"],
+                result["text"],
+                reply_markup=tasks_keyboard(result.get("items") or []),
             )
         elif name == "/contacts":
             await self._send(chat_id, answer_contacts(self.store, question=args or "")["text"])
         elif name == "/contracts":
-            await self._send(chat_id, answer_contracts(self.store)["text"])
+            await self._send(chat_id, answer_contracts(self.store)["text"], reply_markup=hub_keyboard())
+        elif name == "/more":
+            await self.show_hub(chat_id)
         elif name == "/show":
             await self._show_email(chat_id, args or "")
         elif name == "/status":
@@ -501,20 +525,68 @@ class BotRunner:
             await self._send(chat_id, f"Не нашёл открытое обязательство #{escape_html(str(raw))}.")
             return
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Закрыть", callback_data=f"done:{commitment['id']}"),
-                    InlineKeyboardButton(text="Отмена", callback_data="cancel"),
-                ]
-            ]
-        )
         await self.bot.send_message(
             chat_id,
             f"Закрыть обязательство <b>#{commitment['id']}</b>?\n"
             f"«{escape_html(truncate(commitment['text'], 200))}»",
-            reply_markup=keyboard,
+            reply_markup=confirm_done_keyboard(commitment["id"]),
         )
+
+    async def _tasks_view(self) -> tuple[str, InlineKeyboardMarkup]:
+        result = answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)
+        return result["text"], tasks_keyboard(result.get("items") or [])
+
+    async def _handle_nav(self, callback: CallbackQuery, target: str) -> None:
+        """Навигация по inline-кнопкам: перерисовываем текущее сообщение."""
+        message = callback.message
+        if not message:
+            return
+        chat_id = message.chat.id
+
+        text = ""
+        markup = None
+
+        if target == "sync":
+            await message.edit_text("🔄 Запускаю проверку почты…")
+            await self._do_sync(chat_id)
+            await callback.answer()
+            return
+
+        if target.startswith("digest"):
+            days = 7
+            if ":" in target:
+                raw = target.split(":", 1)[1]
+                days = max(1, min(365, int(raw))) if raw.isdigit() else 7
+            text = build_digest(self.store, days=days, follow_up_days=self.cfg.agent.follow_up_days)["text"]
+            markup = digest_keyboard(days)
+        elif target == "tasks":
+            text, markup = await self._tasks_view()
+        elif target == "contacts":
+            text = answer_contacts(self.store)["text"]
+            markup = hub_keyboard()
+        elif target == "contracts":
+            text = answer_contracts(self.store)["text"]
+            markup = hub_keyboard()
+        elif target == "status":
+            text = self._status_text()
+            markup = hub_keyboard()
+        elif target == "help":
+            text = HELP_TEXT
+            markup = hub_keyboard()
+        elif target == "show_hint":
+            text = "Пришлите номер письма: <code>/show 12</code> или скажите «покажи письмо двенадцать»."
+            markup = hub_keyboard()
+        else:
+            await callback.answer("Неизвестный раздел", show_alert=False)
+            return
+
+        try:
+            await message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest as error:
+            if "not modified" not in str(error).lower():
+                logger.debug("nav edit: %s", error)
+
+        await callback.answer()
 
     async def on_callback(self, callback: CallbackQuery) -> None:
         message = callback.message
@@ -524,13 +596,23 @@ class BotRunner:
             return
 
         data = callback.data or ""
+
+        if data.startswith("nav:"):
+            await self._handle_nav(callback, data[4:])
+            return
+
         if data.startswith("done:"):
             raw = data.split(":", 1)[1]
             commitment_id = int(raw) if raw.isdigit() else 0
             closed = self.store.close_commitment(commitment_id) if commitment_id else False
-            text = f"✅ Обязательство #{commitment_id} закрыто." if closed else f"Не нашёл открытое #{commitment_id}."
-            if message:
-                await message.edit_text(text)
+            if message and closed:
+                text, markup = await self._tasks_view()
+                try:
+                    await message.edit_text(f"✅ #{commitment_id} закрыто.\n\n{text}", reply_markup=markup)
+                except TelegramBadRequest:
+                    pass
+            elif message:
+                await message.edit_text(f"Не нашёл открытое #{commitment_id}. Список — /tasks.")
         elif data == "cancel":
             if message:
                 await message.edit_text("Отменено.")
@@ -592,6 +674,7 @@ class BotRunner:
         router.message.register(self.cmd_tasks, Command("tasks"))
         router.message.register(self.cmd_show, Command("show"))
         router.message.register(self.cmd_done, Command("done"))
+        router.message.register(self.cmd_more, Command("more"))
         router.message.register(self.cmd_ask, Command("ask"))
         router.message.register(self.handle_voice, F.voice | F.audio | F.video_note)
         router.message.register(self.handle_text, F.text)
@@ -602,6 +685,11 @@ class BotRunner:
     # ── жизненный цикл ──────────────────────────────────────────────────
     async def run(self) -> None:
         me = await self.bot.get_me()
+        try:
+            await self.bot.set_my_commands(BOT_COMMANDS)
+            logger.info("Меню команд обновлено (%s команд)", len(BOT_COMMANDS))
+        except Exception as error:  # noqa: BLE001 - меню не критично для работы
+            logger.warning("Не удалось обновить меню команд: %s", error)
         logger.info("Бот @%s запущен (long polling)", me.username)
         await self.dispatcher.start_polling(self.bot, allowed_updates=["message", "edited_message"])
 

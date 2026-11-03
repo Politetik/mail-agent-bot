@@ -325,7 +325,7 @@ def answer_tasks(store, limit: int = 12, follow_up_days: int = 3) -> dict:
     silent = [t for t in silent_all if t.get("thread_key") not in their_threads]
 
     if not mine and not theirs and not silent:
-        return {"text": "✅ Открытых обязательств и зависших тредов не найдено.", "email_ids": []}
+        return {"text": "✅ Открытых обязательств и зависших тредов не найдено.", "email_ids": [], "items": []}
 
     lines = ["📌 <b>Что висит</b>", ""]
     email_ids: list[int] = []
@@ -359,7 +359,7 @@ def answer_tasks(store, limit: int = 12, follow_up_days: int = 3) -> dict:
             )
         lines.append("")
 
-    return {"text": "\n".join(lines).strip(), "email_ids": email_ids}
+    return {"text": "\n".join(lines).strip(), "email_ids": email_ids, "items": mine + theirs}
 
 
 def status_label(status: str) -> str:
