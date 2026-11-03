@@ -247,6 +247,9 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.execute("PRAGMA synchronous = NORMAL")
+        # Каскадные удаления и FTS-триггеры могут требовать временных файлов,
+        # а рабочая папка/OneDrive не всегда это позволяют — держим всё в памяти.
+        self.conn.execute("PRAGMA temp_store = MEMORY")
         # Встроенный lower()/LIKE в SQLite понимают только ASCII.
         self.conn.create_function("ru_lower", 1, lambda s: (s or "").lower(), deterministic=True)
         self.conn.executescript(SCHEMA)
@@ -759,6 +762,47 @@ class Store:
         with self.tx():
             for table in ("commitments", "tasks", "contracts", "contacts", "analyses"):
                 self.conn.execute(f"DELETE FROM {table}")
+
+    SENT_FOLDERS = {"отправленные", "sent", "sent items", "sent messages", "sent mail"}
+
+    def purge_sent(self) -> int:
+        """Удаляет письма из «Отправленных» и пересчитывает треды."""
+        folders = [row["folder"] for row in self.conn.execute("SELECT DISTINCT folder FROM emails").fetchall()]
+        sent = [folder for folder in folders if str(folder).strip().lower() in self.SENT_FOLDERS]
+        if not sent:
+            return 0
+
+        placeholders = ",".join("?" for _ in sent)
+        with self.tx():
+            cursor = self.conn.execute(f"DELETE FROM emails WHERE folder IN ({placeholders})", sent)
+            removed = cursor.rowcount
+
+        self.rebuild_threads()
+        return int(removed)
+
+    def rebuild_threads(self) -> None:
+        """Пересобирает агрегаты тредов из писем (после удаления папок)."""
+        with self.tx():
+            self.conn.execute("DELETE FROM threads")
+            self.conn.execute(
+                """INSERT INTO threads
+                     (thread_key, subject, counterparty, message_count,
+                      last_inbound_at, last_outbound_at, last_message_at, updated_at)
+                   SELECT e.thread_key,
+                          (SELECT subject FROM emails x WHERE x.thread_key = e.thread_key
+                            ORDER BY x.sent_at DESC LIMIT 1),
+                          (SELECT from_name FROM emails x
+                            WHERE x.thread_key = e.thread_key AND ru_lower(x.from_addr) <> ru_lower(x.account)
+                            ORDER BY x.sent_at DESC LIMIT 1),
+                          COUNT(*),
+                          MAX(CASE WHEN ru_lower(e.from_addr) = ru_lower(e.account) THEN NULL ELSE e.sent_at END),
+                          MAX(CASE WHEN ru_lower(e.from_addr) = ru_lower(e.account) THEN e.sent_at ELSE NULL END),
+                          MAX(e.sent_at),
+                          datetime('now')
+                     FROM emails e
+                    WHERE e.thread_key IS NOT NULL
+                    GROUP BY e.thread_key"""
+            )
 
 
 def open_store(path: str | Path) -> Store:

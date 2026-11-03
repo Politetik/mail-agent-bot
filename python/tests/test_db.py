@@ -203,3 +203,19 @@ def test_automated_sender_does_not_create_commitments(store):
         account="test@mail.ru",
     )
     assert store.stats()["commitments"] == 0
+
+def test_purge_sent_removes_folder_and_rebuilds_threads(store):
+    store.insert_email(sample_email(uid=1, folder="INBOX", thread_key="t1"))
+    store.insert_email(
+        sample_email(uid=2, folder="Отправленные", thread_key="t1", from_addr="test@mail.ru")
+    )
+    assert store.stats()["emails"] == 2
+
+    removed = store.purge_sent()
+    assert removed == 1
+    assert store.stats()["emails"] == 1
+
+    thread = store.thread("t1")
+    assert thread is not None
+    assert thread["message_count"] == 1
+    assert thread["last_outbound_at"] is None

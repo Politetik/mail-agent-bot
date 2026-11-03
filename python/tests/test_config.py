@@ -21,3 +21,12 @@ def test_cloud_stt_requires_key(tmp_path):
 
     cfg2 = make_cfg(tmp_path, STT_ENABLED="true", STT_PROVIDER="openai", STT_API_KEY="sk-test")
     assert cfg2.has.stt is True
+
+def test_sent_folder_is_excluded_by_default(tmp_path):
+    cfg = make_cfg(tmp_path)
+    assert cfg.mail.include_sent is False
+
+
+def test_sent_folder_can_be_enabled(tmp_path):
+    cfg = make_cfg(tmp_path, MAIL_INCLUDE_SENT="true")
+    assert cfg.mail.include_sent is True

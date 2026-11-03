@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stats", help="статистика базы")
     sub.add_parser("demo", help="демо на тестовых письмах")
     sub.add_parser("reset", help="очистить базу")
+    sub.add_parser("purge-sent", help="удалить «Отправленные» из базы и отчётов")
     sub.add_parser("reanalyze", help="пересобрать разбор писем заново")
     return parser
 
@@ -199,6 +200,12 @@ async def async_main(args) -> int:
 
         if args.command == "demo":
             await run_demo(cfg, store)
+            return 0
+
+        if args.command == "purge-sent":
+            removed = store.purge_sent()
+            store.rebuild_threads()
+            print(f"🗑 Удалено отправленных писем: {removed}. Треды пересчитаны.")
             return 0
 
         if args.command == "reset":

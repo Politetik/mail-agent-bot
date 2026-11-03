@@ -131,7 +131,7 @@ def create_config(env_file: str | Path | None = None, overrides: dict | None = N
             user=_str(values.get("MAIL_USER"), ""),
             password=_str(values.get("MAIL_PASSWORD"), ""),
             folders=folders,
-            include_sent=_bool(values.get("MAIL_INCLUDE_SENT"), True),
+            include_sent=_bool(values.get("MAIL_INCLUDE_SENT"), False),
         ),
         llm=SimpleNamespace(
             provider=provider,
