@@ -1,0 +1,19 @@
+{
+  "name": "mail-agent-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram AI agent for Mail.ru: reads mail, analyzes contracts/negotiations/contacts, answers by text or voice",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node src/index.js",
+    "cli": "node src/cli.js",
+    "doctor": "node src/cli.js doctor",
+    "test": "node --test test/",
+    "demo": "node src/cli.js demo"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.0",
+    "mailparser": "^3.7.0"
+  }
+}

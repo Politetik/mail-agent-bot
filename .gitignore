@@ -1,0 +1,20 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-shm
+*.db-wal
+demo_out.txt
+npm-debug.log*
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+python/.venv/
+pytest-of-*/
+python/tmp*/

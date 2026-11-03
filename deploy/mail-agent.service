@@ -1,0 +1,27 @@
+[Unit]
+Description=Mail.ru AI agent for Telegram
+Documentation=file:///opt/mail-agent/mail-agent-bot/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Создайте отдельного пользователя:
+#   sudo useradd --system --home /opt/mail-agent --shell /usr/sbin/nologin mailagent
+#   sudo chown -R mailagent:mailagent /opt/mail-agent
+User=mailagent
+Group=mailagent
+WorkingDirectory=/opt/mail-agent/mail-agent-bot
+ExecStart=/usr/bin/node src/index.js
+Environment=NODE_ENV=production
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Мягкое ужесточение (не ломает доступ к сети и к ./data)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

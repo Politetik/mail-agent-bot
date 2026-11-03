@@ -1,0 +1,19 @@
+# Нормализация переводов строк: в репозитории — LF, на диске Windows — как удобно.
+* text=auto
+
+*.py   text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# Бинарные файлы не трогаем.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.db   binary
