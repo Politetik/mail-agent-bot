@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from time import monotonic
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -37,7 +38,7 @@ from .keyboards import (
     tasks_keyboard,
 )
 from .patterns import format_phone
-from .stt import SttError, transcribe
+from .stt import SttError, get_local_model, transcribe
 from .sync import run_sync
 from .telegram_format import format_for_telegram
 from .voice_intents import detect_voice_command
@@ -74,6 +75,7 @@ HELP_TEXT = "\n".join(
         "• /tasks — что висит и ждёт ответа",
         "• /done 12 — закрыть обязательство из /tasks",
         "• /more — договоры, статус, помощь (кнопка «⚙️ Ещё»)",
+        "• 🎤 Голос — как записать голосовой вопрос",
         "• /status — состояние подключений и базы",
         "• /show 12 — показать письмо по номеру",
         "",
@@ -417,6 +419,8 @@ class BotRunner:
                 await self.cmd_status(message)
             elif route == "/more":
                 await self.show_hub(message.chat.id)
+            elif route == "/voice":
+                await self.cmd_voice(message)
             return
         await self.answer_question(message.chat.id, text)
 
@@ -429,6 +433,27 @@ class BotRunner:
 
     async def cmd_more(self, message: Message) -> None:
         await self.show_hub(message.chat.id)
+
+    async def cmd_voice(self, message: Message) -> None:
+        await self._send(
+            message.chat.id,
+            "🎤 <b>Голосом</b>\n\n"
+            "Нажмите и удерживайте микрофон в поле ввода, скажите фразу и отпустите — "
+            "я распознаю и отвечу сразу.\n\n"
+            "Примеры: «проверь почту», «что висит», «какой телефон у Соловьёва».\n\n"
+            "<i>Открыть микрофон программно бот не может: это ограничение Telegram — "
+            "запись запускает только клиент. Поэтому кнопка здесь — подсказка.</i>",
+            reply_markup=KEYBOARD,
+        )
+
+    async def _preload_stt(self) -> None:
+        if not self.cfg.has.stt or str(self.cfg.stt.provider).lower() != "local":
+            return
+        try:
+            await asyncio.to_thread(get_local_model, self.cfg)
+            logger.info("Whisper предзагружен — первое голосовое обработается без задержки")
+        except Exception as error:  # noqa: BLE001 - предзагрузка не критична
+            logger.warning("Не удалось предзагрузить Whisper: %s", error)
 
     async def handle_voice(self, message: Message) -> None:
         chat_id = message.chat.id
@@ -675,6 +700,7 @@ class BotRunner:
         router.message.register(self.cmd_show, Command("show"))
         router.message.register(self.cmd_done, Command("done"))
         router.message.register(self.cmd_more, Command("more"))
+        router.message.register(self.cmd_voice, Command("voice"))
         router.message.register(self.cmd_ask, Command("ask"))
         router.message.register(self.handle_voice, F.voice | F.audio | F.video_note)
         router.message.register(self.handle_text, F.text)
@@ -685,6 +711,7 @@ class BotRunner:
     # ── жизненный цикл ──────────────────────────────────────────────────
     async def run(self) -> None:
         me = await self.bot.get_me()
+        asyncio.create_task(self._preload_stt())
         try:
             await self.bot.set_my_commands(BOT_COMMANDS)
             logger.info("Меню команд обновлено (%s команд)", len(BOT_COMMANDS))
