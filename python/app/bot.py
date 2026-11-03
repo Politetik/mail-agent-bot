@@ -11,6 +11,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     KeyboardButton,
     LinkPreviewOptions,
     Message,
@@ -31,6 +33,7 @@ from .patterns import format_phone
 from .stt import SttError, transcribe
 from .sync import run_sync
 from .telegram_format import format_for_telegram
+from .voice_intents import detect_voice_command
 from .util import (
     chunk_text,
     escape_html,
@@ -77,6 +80,9 @@ HELP_TEXT = "\n".join(
         "«какой телефон у Анны Смирновой?»",
         "«что по договору с Ромашкой?»",
         "«о чём договорились по поставке?»",
+        "",
+        "<b>Голосом можно управлять</b>:",
+        "«проверь почту», «сводка за неделю», «что висит», «закрой двенадцать».",
     ]
 )
 
@@ -237,33 +243,37 @@ class BotRunner:
     async def cmd_id(self, message: Message) -> None:
         await message.answer(f"Ваш chat_id: <code>{message.chat.id}</code>")
 
-    async def cmd_status(self, message: Message) -> None:
+    def _status_text(self) -> str:
         stats = self.store.stats()
         info = describe_config(self.cfg)
         last_sync = self.store.meta_get("last_sync_at")
-        await message.answer(
-            "\n".join(
-                [
-                    "⚙️ <b>Статус</b>",
-                    "",
-                    f"📧 Почта: {escape_html(info['mail'])}",
-                    f"🧠 ИИ: {escape_html(info['llm'])}",
-                    f"🎤 Голос: {escape_html(info['stt'])}",
-                    "",
-                    f"📬 Писем: <b>{stats['emails']}</b> · разобрано: {stats['analyzed']}",
-                    f"📇 Контактов: {stats['contacts']} · 📄 договоров: {stats['contracts']}",
-                    f"📌 Открытых задач: {stats['openTasks']} · ❗ высокий риск: {stats['highRisk']}",
-                    "",
-                    "🕓 Последняя синхронизация: "
-                    + (format_datetime(last_sync, self.cfg.agent.timezone) if last_sync else "ещё не было"),
-                ]
-            )
+        return "\n".join(
+            [
+                "⚙️ <b>Статус</b>",
+                "",
+                f"📧 Почта: {escape_html(info['mail'])}",
+                f"🧠 ИИ: {escape_html(info['llm'])}",
+                f"🎤 Голос: {escape_html(info['stt'])}",
+                "",
+                f"📬 Писем: <b>{stats['emails']}</b> · разобрано: {stats['analyzed']}",
+                f"📇 Контактов: {stats['contacts']} · 📄 договоров: {stats['contracts']}",
+                f"📌 Открытых обязательств: {stats['openTasks']} · ❗ высокий риск: {stats['highRisk']}",
+                "",
+                "🕓 Последняя синхронизация: "
+                + (format_datetime(last_sync, self.cfg.agent.timezone) if last_sync else "ещё не было"),
+            ]
         )
 
+    async def cmd_status(self, message: Message) -> None:
+        await message.answer(self._status_text())
+
     async def cmd_sync(self, message: Message) -> None:
-        chat_id = message.chat.id
+        await self._do_sync(message.chat.id)
+
+    async def _do_sync(self, chat_id: int) -> None:
         if not self.cfg.has.mail:
-            await message.answer(
+            await self._send(
+                chat_id,
                 "📭 Почта не настроена.\n\nВпишите в <code>.env</code>:\n"
                 "<code>MAIL_USER=you@yandex.ru</code>\n"
                 "<code>MAIL_PASSWORD=пароль_приложения</code>\n\n"
@@ -339,13 +349,15 @@ class BotRunner:
             await message.answer(f"Не нашёл открытое обязательство #{raw}. Список — /tasks.")
 
     async def cmd_show(self, message: Message, command: CommandObject) -> None:
-        raw = (command.args or "").strip()
+        await self._show_email(message.chat.id, (command.args or "").strip())
+
+    async def _show_email(self, chat_id: int, raw: str) -> None:
         if not raw.isdigit():
-            await message.answer("Укажите номер письма: <code>/show 12</code>")
+            await self._send(chat_id, "Укажите номер письма: <code>/show 12</code>")
             return
         email = self.store.get_email(int(raw))
         if not email:
-            await message.answer(f"Письмо #{raw} не найдено.")
+            await self._send(chat_id, f"Письмо #{escape_html(raw)} не найдено.")
             return
 
         lines = [
@@ -370,7 +382,7 @@ class BotRunner:
         if email.get("addresses"):
             lines.append(f"📍 {escape_html(' | '.join(email['addresses']))}")
         lines.extend(["", "<b>Текст</b>", escape_html(truncate(email.get("body_text") or "", 2500))])
-        await self._send(message.chat.id, "\n".join(lines))
+        await self._send(chat_id, "\n".join(lines))
 
     async def cmd_ask(self, message: Message, command: CommandObject) -> None:
         question = (command.args or "").strip()
@@ -405,36 +417,125 @@ class BotRunner:
             return
 
         if not self.cfg.has.stt:
-            await message.answer(
-                "🎤 Голосовые сообщения требуют распознавания речи.\n\n"
-                "Добавьте в <code>.env</code>: <code>OPENAI_API_KEY=sk-...</code> (Whisper) "
-                "либо укажите свой <code>STT_BASE_URL</code>."
+            await self._send(
+                chat_id,
+                "🎤 Распознавание речи отключено.\n\n"
+                "Включите локальный Whisper: <code>STT_PROVIDER=local</code> в <code>.env</code>.",
             )
             return
 
         if chat_id in self.busy:
-            await message.answer("⏳ Ещё работаю над прошлым запросом, секунду…")
+            await self._send(chat_id, "⏳ Ещё работаю над прошлым запросом, секунду…")
             return
 
         self.busy.add(chat_id)
+        text = ""
         try:
             await self.bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
             file = await self.bot.get_file(media.file_id)
             buffer = await self.bot.download_file(file.file_path)
             audio = buffer.getvalue() if hasattr(buffer, "getvalue") else bytes(buffer)
             result = await transcribe(self.cfg, audio)
+            text = result["text"]
             await self._send(
                 chat_id,
-                f"🎤 <i>Распознано:</i> {escape_html(truncate(result['text'], 500))}",
+                f"🎤 <i>Распознано:</i> {escape_html(truncate(text, 500))}",
             )
-            await self.answer_question(chat_id, result["text"])
         except SttError as error:
             await self._send(chat_id, f"🎤 Не смог распознать голосовое.\n\n{escape_html(str(error))}")
+            return
         except Exception as error:  # noqa: BLE001
             logger.warning("Голос не обработан: %s", error)
             await self._send(chat_id, f"🎤 Не смог распознать голосовое.\n\n{escape_html(str(error))}")
+            return
         finally:
             self.busy.discard(chat_id)
+
+        # Голос — это команда или вопрос?
+        command = detect_voice_command(text)
+        if command:
+            await self.execute_voice_command(chat_id, command)
+        else:
+            await self.answer_question(chat_id, text)
+
+    async def execute_voice_command(self, chat_id: int, command) -> None:
+        name = command.command
+        args = command.args
+
+        if name == "/sync":
+            await self._do_sync(chat_id)
+        elif name == "/digest":
+            try:
+                days = max(1, min(365, int(args or 7)))
+            except (TypeError, ValueError):
+                days = 7
+            digest = build_digest(self.store, days=days, follow_up_days=self.cfg.agent.follow_up_days)
+            await self._send(chat_id, digest["text"])
+        elif name == "/tasks":
+            await self._send(
+                chat_id,
+                answer_tasks(self.store, follow_up_days=self.cfg.agent.follow_up_days)["text"],
+            )
+        elif name == "/contacts":
+            await self._send(chat_id, answer_contacts(self.store, question=args or "")["text"])
+        elif name == "/contracts":
+            await self._send(chat_id, answer_contracts(self.store)["text"])
+        elif name == "/show":
+            await self._show_email(chat_id, args or "")
+        elif name == "/status":
+            await self._send(chat_id, self._status_text())
+        elif name == "/help":
+            await self._send(chat_id, HELP_TEXT)
+        elif name == "/done":
+            await self._confirm_done(chat_id, args)
+        else:
+            await self._send(chat_id, "Не понял команду. Скажите «помощь».")
+
+    async def _confirm_done(self, chat_id: int, raw: str | None) -> None:
+        if not raw or not str(raw).isdigit():
+            await self._send(chat_id, "Скажите номер обязательства: «закрой двенадцать». Список — /tasks.")
+            return
+
+        commitment = self.store.get_commitment(int(raw))
+        if not commitment or commitment.get("status") != "open":
+            await self._send(chat_id, f"Не нашёл открытое обязательство #{escape_html(str(raw))}.")
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Закрыть", callback_data=f"done:{commitment['id']}"),
+                    InlineKeyboardButton(text="Отмена", callback_data="cancel"),
+                ]
+            ]
+        )
+        await self.bot.send_message(
+            chat_id,
+            f"Закрыть обязательство <b>#{commitment['id']}</b>?\n"
+            f"«{escape_html(truncate(commitment['text'], 200))}»",
+            reply_markup=keyboard,
+        )
+
+    async def on_callback(self, callback: CallbackQuery) -> None:
+        message = callback.message
+        chat_id = message.chat.id if message else None
+        if chat_id not in self.cfg.telegram.allowed_chat_ids:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+        data = callback.data or ""
+        if data.startswith("done:"):
+            raw = data.split(":", 1)[1]
+            commitment_id = int(raw) if raw.isdigit() else 0
+            closed = self.store.close_commitment(commitment_id) if commitment_id else False
+            text = f"✅ Обязательство #{commitment_id} закрыто." if closed else f"Не нашёл открытое #{commitment_id}."
+            if message:
+                await message.edit_text(text)
+        elif data == "cancel":
+            if message:
+                await message.edit_text("Отменено.")
+
+        await callback.answer()
 
     async def answer_question(self, chat_id: int, question: str) -> None:
         if chat_id in self.busy:
@@ -494,6 +595,7 @@ class BotRunner:
         router.message.register(self.cmd_ask, Command("ask"))
         router.message.register(self.handle_voice, F.voice | F.audio | F.video_note)
         router.message.register(self.handle_text, F.text)
+        router.callback_query.register(self.on_callback)
 
         self.dispatcher.include_router(router)
 

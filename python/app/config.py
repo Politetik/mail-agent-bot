@@ -145,10 +145,19 @@ def create_config(env_file: str | Path | None = None, overrides: dict | None = N
         ),
         stt=SimpleNamespace(
             enabled=_bool(values.get("STT_ENABLED"), True),
+            provider=_str(values.get("STT_PROVIDER"), "local"),
             base_url=stt_base.rstrip("/"),
             api_key=stt_key,
-            model=_str(values.get("STT_MODEL"), "whisper-1"),
+            model=_str(values.get("STT_MODEL"), "small"),
             language=_str(values.get("STT_LANGUAGE"), "ru"),
+            device=_str(values.get("STT_DEVICE"), "auto"),
+            compute_type=_str(values.get("STT_COMPUTE_TYPE"), "auto"),
+            beam_size=_int(values.get("STT_BEAM_SIZE"), 5),
+            cache_dir=str(Path(_str(values.get("STT_CACHE_DIR"), str(BASE_DIR / "data" / "models"))).resolve()),
+            prompt=_str(
+                values.get("STT_PROMPT"),
+                "Договор, счёт, ИНН, накладная, предоплата, поставка, обязательство, Ромашка, Соловьёв.",
+            ),
             timeout_ms=_int(values.get("STT_TIMEOUT_MS"), 120000),
         ),
         db=SimpleNamespace(path=str(db_path)),
@@ -176,7 +185,7 @@ def create_config(env_file: str | Path | None = None, overrides: dict | None = N
         telegram=bool(cfg.telegram.token),
         mail=bool(cfg.mail.user and cfg.mail.password),
         llm=(cfg.llm.enabled and bool(cfg.llm.api_key)) or (local_llm and cfg.llm.enabled),
-        stt=cfg.stt.enabled and bool(cfg.stt.api_key),
+        stt=cfg.stt.enabled and (cfg.stt.provider == "local" or bool(cfg.stt.api_key)),
     )
     return cfg
 

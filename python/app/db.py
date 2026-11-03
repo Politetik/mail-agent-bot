@@ -571,6 +571,10 @@ class Store:
         )
         return cursor.rowcount > 0
 
+    def get_commitment(self, commitment_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM commitments WHERE id = ?", (commitment_id,)).fetchone()
+        return dict(row) if row else None
+
     def open_commitments(self, direction: str | None = None, limit: int = 50) -> list[dict]:
         sql = "SELECT * FROM commitments WHERE status = 'open'"
         params: list[Any] = []
