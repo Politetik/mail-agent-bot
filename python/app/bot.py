@@ -13,6 +13,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
+    InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
     Message,
@@ -27,6 +28,7 @@ from .answer import (
     kind_label,
     status_label,
 )
+from .compose import compose_email
 from .config import describe_config
 from .keyboards import (
     BUTTON_ROUTES,
@@ -38,6 +40,7 @@ from .keyboards import (
     tasks_keyboard,
 )
 from .patterns import format_phone
+from .smtp_client import SendError, send_email
 from .stt import SttError, get_local_model, transcribe
 from .sync import run_sync
 from .telegram_format import format_for_telegram
@@ -59,6 +62,8 @@ BOT_COMMANDS = [
     BotCommand(command="contacts", description="Контакты с телефонами"),
     BotCommand(command="contracts", description="Реестр договоров"),
     BotCommand(command="show", description="Письмо по номеру"),
+    BotCommand(command="send", description="Написать письмо"),
+    BotCommand(command="reply", description="Ответить на письмо"),
     BotCommand(command="done", description="Закрыть обязательство"),
     BotCommand(command="status", description="Состояние подключений"),
     BotCommand(command="help", description="Справка"),
@@ -77,6 +82,8 @@ HELP_TEXT = "\n".join(
         "• /more — договоры, статус, помощь (кнопка «⚙️ Ещё»)",
         "• /status — состояние подключений и базы",
         "• /show 12 — показать письмо по номеру",
+        "• /send напиши Ивану, что… — черновик письма с подтверждением",
+        "• /reply 12 спасибо, договор подписан — ответ на письмо",
         "",
         "Просто напишите вопрос текстом:",
         "«какой телефон у Анны Смирновой?»",
@@ -178,6 +185,8 @@ class BotRunner:
         self.dispatcher = Dispatcher()
         self.router = Router()
         self.busy: set[int] = set()
+        self.awaiting_feedback: dict[int, int] = {}
+        self.send_history: dict[int, list[float]] = {}
         self._register()
 
     # ── отправка ────────────────────────────────────────────────────────
@@ -396,8 +405,215 @@ class BotRunner:
             return
         await self.answer_question(message.chat.id, question)
 
+    # ── письма: черновик → подтверждение → отправка ────────────────────
+    def _send_rate_ok(self, chat_id: int) -> bool:
+        limit = max(1, int(getattr(self.cfg.mail, "send_limit_hour", 10) or 10))
+        now = monotonic()
+        history = [stamp for stamp in self.send_history.get(chat_id, []) if now - stamp < 3600]
+        self.send_history[chat_id] = history
+        return len(history) < limit
+
+    @staticmethod
+    def _draft_markup(draft_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✉️ Отправить", callback_data=f"send:{draft_id}"),
+                    InlineKeyboardButton(text="✏️ Переписать", callback_data=f"redraft:{draft_id}"),
+                ],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{draft_id}")],
+            ]
+        )
+
+    async def cmd_send(self, message: Message, command: CommandObject) -> None:
+        await self.start_draft(message.chat.id, (command.args or "").strip())
+
+    async def cmd_reply(self, message: Message, command: CommandObject) -> None:
+        chat_id = message.chat.id
+        args = (command.args or "").strip()
+        if not args:
+            await self._send(chat_id, "Формат: <code>/reply 12 спасибо, договор подписан</code>")
+            return
+        number, _, instruction = args.partition(" ")
+        if not number.isdigit():
+            await self._send(chat_id, "Первым укажите номер письма: <code>/reply 12 текст ответа</code>")
+            return
+        email = self.store.get_email(int(number))
+        if not email:
+            await self._send(chat_id, f"Письмо #{escape_html(number)} не найдено.")
+            return
+        await self.start_draft(
+            chat_id,
+            instruction.strip() or "Ответь на это письмо по существу.",
+            reply_to=email,
+        )
+
+    async def start_draft(self, chat_id: int, instruction: str, reply_to: dict | None = None) -> None:
+        if not getattr(self.cfg.mail, "send_enabled", True):
+            await self._send(chat_id, "Отправка писем отключена (<code>EMAIL_SEND_ENABLED=false</code>).")
+            return
+        if not self.cfg.has.mail:
+            await self._send(chat_id, "Почта не настроена — отправлять некуда.")
+            return
+        if not instruction:
+            await self._send(
+                chat_id,
+                "Опишите письмо:\n<code>/send напиши Ивану, что договор подписан</code>\n"
+                "или ответ на письмо: <code>/reply 12 спасибо, всё получил</code>",
+            )
+            return
+        if not self._send_rate_ok(chat_id):
+            await self._send(chat_id, "⏳ Слишком много писем за час — попробуйте позже.")
+            return
+
+        await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        try:
+            draft = await compose_email(self.llm, self.cfg, self.store, instruction, reply_to=reply_to)
+        except ValueError as error:
+            await self._send(chat_id, f"✍️ {escape_html(str(error))}")
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.warning("compose: %s", error)
+            await self._send(chat_id, f"✍️ Не смог собрать черновик: {escape_html(str(error))}")
+            return
+
+        subject = draft["subject"] or "(без темы)"
+        if reply_to and not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        draft_id = self.store.create_draft(
+            chat_id,
+            draft["to"],
+            subject,
+            draft["body"],
+            instruction=instruction,
+            in_reply_to=reply_to.get("message_id") if reply_to else None,
+            references=reply_to.get("message_id") if reply_to else None,
+            source_email_id=reply_to.get("id") if reply_to else None,
+        )
+        await self.show_draft(chat_id, draft_id)
+
+    async def show_draft(self, chat_id: int, draft_id: int) -> None:
+        draft = self.store.get_draft(draft_id)
+        if not draft:
+            await self._send(chat_id, "Черновик не найден.")
+            return
+
+        header = "\n".join(
+            [
+                "✉️ <b>Черновик письма</b>",
+                "",
+                f"<b>Кому:</b> {escape_html(draft['to_addrs'])}",
+                f"<b>Тема:</b> {escape_html(draft['subject'] or '(без темы)')}",
+                "",
+            ]
+        )
+        body_chunks = format_for_telegram(draft["body"])
+        footer = "<i>Проверьте и подтвердите отправку.</i>"
+        combined = f"{header}\n\n{chr(10).join(body_chunks)}\n\n{footer}"
+        if len(combined) <= 3800:
+            await self._send(chat_id, combined, reply_markup=self._draft_markup(draft_id))
+            return
+
+        await self._send(chat_id, header)
+        await self._send_parts(chat_id, body_chunks)
+        await self._send(chat_id, footer, reply_markup=self._draft_markup(draft_id))
+
+    async def regenerate_draft(self, chat_id: int, draft_id: int, feedback: str) -> None:
+        draft = self.store.get_draft(draft_id)
+        if not draft or draft.get("status") != "pending":
+            await self._send(chat_id, "Этот черновик уже неактуален.")
+            return
+
+        instruction = (
+            f"{draft.get('instruction') or 'Напиши письмо'}\n\n"
+            f"Текущий черновик:\nКому: {draft['to_addrs']}\nТема: {draft['subject']}\n{draft['body']}\n\n"
+            f"Правки владельца: {feedback}"
+        )
+        await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        try:
+            updated = await compose_email(self.llm, self.cfg, self.store, instruction)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("redraft: %s", error)
+            await self._send(chat_id, f"✍️ Не смог переписать: {escape_html(str(error))}")
+            return
+
+        self.store.update_draft(
+            draft_id,
+            to_addrs=updated["to"],
+            subject=updated["subject"] or draft["subject"],
+            body=updated["body"],
+            feedback=feedback,
+        )
+        await self._send(chat_id, "🔄 Переписал с учётом правок:")
+        await self.show_draft(chat_id, draft_id)
+
+    async def _send_draft(self, callback: CallbackQuery, draft_id: int) -> None:
+        message = callback.message
+        chat_id = message.chat.id if message else None
+        draft = self.store.get_draft(draft_id)
+
+        if not draft or draft.get("chat_id") != chat_id:
+            await callback.answer("Черновик не найден", show_alert=True)
+            return
+        if draft.get("status") != "pending":
+            await callback.answer("Это письмо уже отправлено или отменено", show_alert=True)
+            return
+        if not self._send_rate_ok(chat_id):
+            await callback.answer("Слишком много писем за час", show_alert=True)
+            return
+
+        await callback.answer("Отправляю…")
+        if message:
+            try:
+                await message.edit_text("⏳ Отправляю письмо…")
+            except TelegramBadRequest:
+                pass
+
+        try:
+            result = await asyncio.to_thread(
+                send_email,
+                self.cfg,
+                [part.strip() for part in str(draft["to_addrs"]).split(",") if part.strip()],
+                draft["subject"] or "(без темы)",
+                draft["body"],
+                in_reply_to=draft.get("in_reply_to"),
+                references=draft.get("references_h"),
+            )
+        except SendError as error:
+            if message:
+                await message.edit_text(
+                    f"❌ <b>Не отправлено</b>\n\n{escape_html(str(error))}\n\nЧерновик сохранён — попробуйте ещё раз."
+                )
+            await callback.answer(str(error)[:180], show_alert=True)
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.warning("send: %s", error)
+            if message:
+                await message.edit_text(f"❌ Не отправлено: {escape_html(str(error))}")
+            return
+
+        self.store.set_draft_status(draft_id, "sent")
+        self.send_history.setdefault(chat_id, []).append(monotonic())
+
+        note = "\n\n<i>Копия сохранена в «Отправленные»</i>" if result.get("saved_to_sent") else ""
+        if message:
+            await message.edit_text(
+                "✅ <b>Отправлено</b>\n\n"
+                f"<b>Кому:</b> {escape_html(draft['to_addrs'])}\n"
+                f"<b>Тема:</b> {escape_html(draft['subject'] or '(без темы)')}"
+                f"{note}"
+            )
+
     async def handle_text(self, message: Message) -> None:
+        chat_id = message.chat.id
         text = (message.text or "").strip()
+
+        if chat_id in self.awaiting_feedback:
+            draft_id = self.awaiting_feedback.pop(chat_id)
+            await self.regenerate_draft(chat_id, draft_id, text)
+            return
+
         route = BUTTON_ROUTES.get(text)
         if route:
             if route == "/sync":
@@ -607,6 +823,35 @@ class BotRunner:
             await self._handle_nav(callback, data[4:])
             return
 
+        if data.startswith("send:"):
+            raw = data.split(":", 1)[1]
+            await self._send_draft(callback, int(raw) if raw.isdigit() else 0)
+            return
+
+        if data.startswith("redraft:"):
+            raw = data.split(":", 1)[1]
+            draft_id = int(raw) if raw.isdigit() else 0
+            draft = self.store.get_draft(draft_id)
+            if not draft or draft.get("chat_id") != chat_id or draft.get("status") != "pending":
+                await callback.answer("Черновик недоступен", show_alert=True)
+                return
+            self.awaiting_feedback[chat_id] = draft_id
+            if message:
+                await message.edit_text("✏️ Что изменить в письме? Напишите одним сообщением — перепишу.")
+            await callback.answer()
+            return
+
+        if data.startswith("cancel:"):
+            raw = data.split(":", 1)[1]
+            draft_id = int(raw) if raw.isdigit() else 0
+            draft = self.store.get_draft(draft_id)
+            if draft and draft.get("chat_id") == chat_id and draft.get("status") == "pending":
+                self.store.set_draft_status(draft_id, "cancelled")
+                if message:
+                    await message.edit_text("❌ Черновик отменён.")
+            await callback.answer()
+            return
+
         if data.startswith("done:"):
             raw = data.split(":", 1)[1]
             commitment_id = int(raw) if raw.isdigit() else 0
@@ -679,6 +924,8 @@ class BotRunner:
         router.message.register(self.cmd_contracts, Command("contracts"))
         router.message.register(self.cmd_tasks, Command("tasks"))
         router.message.register(self.cmd_show, Command("show"))
+        router.message.register(self.cmd_send, Command("send"))
+        router.message.register(self.cmd_reply, Command("reply"))
         router.message.register(self.cmd_done, Command("done"))
         router.message.register(self.cmd_more, Command("more"))
         router.message.register(self.cmd_ask, Command("ask"))

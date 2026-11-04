@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from .util import logger, now_iso
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -177,6 +177,24 @@ CREATE TABLE IF NOT EXISTS commitments (
 );
 CREATE INDEX IF NOT EXISTS idx_commitments_status ON commitments (status, due);
 CREATE INDEX IF NOT EXISTS idx_commitments_thread ON commitments (thread_key);
+
+-- Черновики писем: создаются ботом, отправляются только после подтверждения.
+CREATE TABLE IF NOT EXISTS drafts (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id         INTEGER NOT NULL,
+  to_addrs        TEXT NOT NULL,
+  subject         TEXT,
+  body            TEXT NOT NULL,
+  instruction     TEXT,
+  in_reply_to     TEXT,
+  references_h    TEXT,
+  source_email_id INTEGER,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  feedback        TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_chat ON drafts (chat_id, status);
 """
 
 SELECT_EMAIL = """
@@ -594,6 +612,73 @@ class Store:
             (now_iso(), commitment_id),
         )
         return cursor.rowcount > 0
+
+    # ── черновики писем ─────────────────────────────────────────────────
+    def create_draft(
+        self,
+        chat_id: int,
+        to_addrs,
+        subject: str | None,
+        body: str,
+        *,
+        instruction: str | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
+        source_email_id: int | None = None,
+    ) -> int:
+        recipients = ", ".join(to_addrs) if isinstance(to_addrs, (list, tuple)) else str(to_addrs)
+        cursor = self.conn.execute(
+            """INSERT INTO drafts
+                 (chat_id, to_addrs, subject, body, instruction, in_reply_to, references_h,
+                  source_email_id, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (
+                chat_id,
+                recipients,
+                subject,
+                body,
+                instruction,
+                in_reply_to,
+                references,
+                source_email_id,
+                now_iso(),
+                now_iso(),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def get_draft(self, draft_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_draft(self, draft_id: int, *, to_addrs=None, subject=None, body=None, feedback=None, status=None) -> bool:
+        fields: list[str] = []
+        params: list[Any] = []
+        if to_addrs is not None:
+            fields.append("to_addrs = ?")
+            params.append(", ".join(to_addrs) if isinstance(to_addrs, (list, tuple)) else str(to_addrs))
+        if subject is not None:
+            fields.append("subject = ?")
+            params.append(subject)
+        if body is not None:
+            fields.append("body = ?")
+            params.append(body)
+        if feedback is not None:
+            fields.append("feedback = ?")
+            params.append(feedback)
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if not fields:
+            return False
+        fields.append("updated_at = ?")
+        params.append(now_iso())
+        params.append(draft_id)
+        cursor = self.conn.execute(f"UPDATE drafts SET {', '.join(fields)} WHERE id = ?", params)
+        return cursor.rowcount > 0
+
+    def set_draft_status(self, draft_id: int, status: str) -> bool:
+        return self.update_draft(draft_id, status=status)
 
     def thread(self, thread_key: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM threads WHERE thread_key = ?", (thread_key,)).fetchone()
