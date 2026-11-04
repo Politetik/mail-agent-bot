@@ -23,7 +23,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
     is_persistent=True,
-    input_field_placeholder="Спросите или отправьте голосовое",
+    input_field_placeholder="Напишите вопрос",
 )
 
 # Что делает каждая кнопка постоянной панели.

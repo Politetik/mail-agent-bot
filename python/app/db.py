@@ -780,6 +780,18 @@ class Store:
         self.rebuild_threads()
         return int(removed)
 
+    def reclassify_bulk(self, classifier) -> int:
+        """Пересчитывает флаг «рассылка» для сохранённых писем."""
+        rows = self.conn.execute("SELECT id, from_addr, subject, is_bulk FROM emails").fetchall()
+        changed = 0
+        with self.tx():
+            for row in rows:
+                flag = 1 if classifier(row["from_addr"], row["subject"]) else 0
+                if flag != int(row["is_bulk"] or 0):
+                    self.conn.execute("UPDATE emails SET is_bulk = ? WHERE id = ?", (flag, row["id"]))
+                    changed += 1
+        return changed
+
     def rebuild_threads(self) -> None:
         """Пересобирает агрегаты тредов из писем (после удаления папок)."""
         with self.tx():

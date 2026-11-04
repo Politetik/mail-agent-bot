@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("demo", help="демо на тестовых письмах")
     sub.add_parser("reset", help="очистить базу")
     sub.add_parser("purge-sent", help="удалить «Отправленные» из базы и отчётов")
+    sub.add_parser("reclassify", help="пересчитать, что считать рассылкой")
     sub.add_parser("reanalyze", help="пересобрать разбор писем заново")
     return parser
 
@@ -200,6 +201,13 @@ async def async_main(args) -> int:
 
         if args.command == "demo":
             await run_demo(cfg, store)
+            return 0
+
+        if args.command == "reclassify":
+            from .patterns import is_likely_bulk
+
+            changed = store.reclassify_bulk(is_likely_bulk)
+            print(f"♻️ Изменено флагов «рассылка»: {changed}")
             return 0
 
         if args.command == "purge-sent":

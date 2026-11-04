@@ -96,5 +96,14 @@ def test_kind_status_risk():
 
 def test_bulk_detection():
     assert detect_bulk({"list-unsubscribe": "<mailto:unsub@x>"}, "news@shop.ru", "Скидки") is True
-    assert detect_bulk({}, "no-reply@shop.ru", "Заказ") is True
+    # транзакционные уведомления важны — не считаем рассылкой
+    assert detect_bulk({}, "no-reply@shop.ru", "Ваш заказ отправлен") is False
+    assert detect_bulk({}, "mailer@sender.ozon.ru", "Заказ отменён") is False
+    assert detect_bulk({}, "noreply@alfabank.ru", "Уведомление о новом счёте") is False
+    assert detect_bulk({}, "support@example.com", "Your verification code") is False
+    # маркетинг отсекаем
+    assert detect_bulk({}, "mailer@sender.ozon.ru", "Samsung Galaxy S26 | S26+") is True
+    assert detect_bulk({}, "news@shop.ru", "Скидки недели: −30%") is True
+    assert detect_bulk({}, "no-reply@shop.ru", "Поделитесь впечатлением") is True
+    # обычная переписка
     assert detect_bulk({}, "ivan@romashka.ru", "Договор") is False

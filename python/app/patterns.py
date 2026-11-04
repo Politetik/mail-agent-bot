@@ -398,6 +398,41 @@ def extract_asks(text, limit: int = 3) -> list[str]:
     return found
 
 
+PROMO_RE = re.compile(
+    r"(скидк|распродаж|акци[яи]|промокод|clearance|black\s*friday|sale\b|discount|"
+    r"поделитесь\s+впечатлением|оставьте\s+отзыв|подписк|дайджест|новости|"
+    r"−\s*\d+\s*%|-\s*\d+\s*%|\d+\s*%\s+на)",
+    re.IGNORECASE,
+)
+MARKETING_SENDER_RE = re.compile(
+    r"^(news|newsletter|marketing|promo|mailer|travel|digest|updates?|broadcast|info)$",
+    re.IGNORECASE,
+)
+TRANSACTIONAL_RE = re.compile(
+    r"(заказ|доставк|выдач|сч[её]т|счет|оплат|плат[её]ж|код|подтвержд|пароль|безопасн|"
+    r"oauth|verification|verify|invoice|order|delivery|receipt|выписк|\bcode\b)",
+    re.IGNORECASE,
+)
+
+
+def is_likely_bulk(from_address: str | None, subject: str | None) -> bool:
+    """Маркетинг/рассылки — да; транзакционные уведомления (заказ, счёт, код) — нет."""
+    text = str(subject or "")
+    local = str(from_address or "").lower().split("@")[0]
+    transactional = bool(TRANSACTIONAL_RE.search(text))
+
+    if transactional:
+        # Заказ отменён, счёт выставлен, код подтверждения — это важно, разбираем.
+        return False
+    if MARKETING_SENDER_RE.match(local):
+        return True
+    if PROMO_RE.search(text):
+        return True
+    if re.match(r"^(no-?reply|noreply|do-?not-?reply|mailer-daemon|postmaster|notification)", local):
+        return True
+    return False
+
+
 def detect_bulk(headers, from_address, subject) -> bool:
     def get(name: str) -> str:
         if headers is None:
@@ -409,12 +444,7 @@ def detect_bulk(headers, from_address, subject) -> bool:
 
     if get("list-unsubscribe") or get("list-id") or str(get("precedence")).lower() == "bulk":
         return True
-    local = str(from_address or "").lower().split("@")[0]
-    if re.match(r"^(no-?reply|noreply|do-?not-?reply|mailer-daemon|postmaster|notification)", local):
-        return True
-    if re.search(r"рассылк|unsubscribe|отписаться|дайджест|newsletter", str(subject or ""), re.IGNORECASE):
-        return True
-    return False
+    return is_likely_bulk(from_address, subject)
 
 
 def extract_all(text, subject: str = "", from_address: str = "") -> dict:

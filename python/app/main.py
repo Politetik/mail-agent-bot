@@ -54,7 +54,8 @@ async def run() -> int:
     info = describe_config(cfg)
     print(f"  Почта:    {info['mail']}")
     print(f"  ИИ:       {info['llm']}")
-    print(f"  Голос:    {info['stt']}")
+    if cfg.has.stt:
+        print(f"  Голос:    {info['stt']}")
     print(f"  Telegram: {info['telegram']}")
     print(f"  База:     {info['db']}")
     print("")
