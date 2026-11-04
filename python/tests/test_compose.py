@@ -93,3 +93,36 @@ def test_compose_email_requires_llm(tmp_path):
             asyncio.run(compose_email(None, cfg, store, "напиши письмо"))
     finally:
         store.close()
+
+def test_detect_freeform_send_requires_address():
+    from app.compose import detect_freeform_send
+
+    assert detect_freeform_send("привет, как дела") is None
+    request = detect_freeform_send("ivan@romashka.ru: привет, это тест")
+    assert request is not None
+    assert request["auto_send"] is False
+    assert "ivan@romashka.ru" in request["instruction"]
+
+
+def test_detect_freeform_send_with_trigger_sends_immediately():
+    from app.compose import detect_freeform_send
+
+    request = detect_freeform_send("ivan@romashka.ru: привет, это тест. Отправить")
+    assert request is not None
+    assert request["auto_send"] is True
+    assert "отправить" not in request["instruction"].lower()
+
+
+def test_detect_freeform_send_by_name_and_trigger():
+    from app.compose import detect_freeform_send
+
+    request = detect_freeform_send("Напиши Ивану, что договор подписан. Отправить")
+    assert request is not None
+    assert request["auto_send"] is True
+
+
+def test_detect_freeform_send_ignores_plain_questions():
+    from app.compose import detect_freeform_send
+
+    assert detect_freeform_send("какой телефон у Ивана?") is None
+    assert detect_freeform_send("что по договору с Ромашкой?") is None

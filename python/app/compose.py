@@ -7,6 +7,30 @@ import re
 from .sanitize import sanitize, wrap_untrusted
 from .util import logger, parse_json_loose, truncate
 
+SEND_TRIGGER_RE = re.compile(r"\b(отправить|отправь|отправляй)\b", re.IGNORECASE)
+WRITE_VERB_RE = re.compile(r"\b(напиши|написать|ответь|ответить|письмо|сообщение)\b", re.IGNORECASE)
+
+
+def detect_freeform_send(text: str) -> dict | None:
+    """Свободная форма: «ivan@mail.ru: привет, это тест. Отправить».
+
+    Возвращает {'auto_send': bool, 'instruction': str} или None.
+    auto_send=True, если в сообщении есть явное слово «отправить».
+    """
+    from .smtp_client import extract_addresses
+
+    value = str(text or "")
+    has_email = bool(extract_addresses(value))
+    has_verb = bool(WRITE_VERB_RE.search(value))
+    trigger = bool(SEND_TRIGGER_RE.search(value))
+
+    if not has_email and not (has_verb and trigger):
+        return None
+
+    instruction = SEND_TRIGGER_RE.sub(" ", value)
+    instruction = re.sub(r"\s{2,}", " ", instruction).strip(" ,.;:")
+    return {"auto_send": trigger, "instruction": instruction}
+
 SYSTEM_PROMPT = """Ты — деловой ассистент владельца почтового ящика. Готовишь черновик письма.
 
 Верни СТРОГО JSON без markdown:

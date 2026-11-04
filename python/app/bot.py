@@ -28,7 +28,7 @@ from .answer import (
     kind_label,
     status_label,
 )
-from .compose import compose_email
+from .compose import compose_email, detect_freeform_send
 from .config import describe_config
 from .keyboards import (
     BUTTON_ROUTES,
@@ -84,6 +84,7 @@ HELP_TEXT = "\n".join(
         "• /show 12 — показать письмо по номеру",
         "• /send напиши Ивану, что… — черновик письма с подтверждением",
         "• /reply 12 спасибо, договор подписан — ответ на письмо",
+        "• или просто: <code>ivan@mail.ru: привет, это тест. Отправить</code>",
         "",
         "Просто напишите вопрос текстом:",
         "«какой телефон у Анны Смирновой?»",
@@ -548,20 +549,41 @@ class BotRunner:
         await self._send(chat_id, "🔄 Переписал с учётом правок:")
         await self.show_draft(chat_id, draft_id)
 
+    def _sent_text(self, draft: dict, result: dict) -> str:
+        note = "\n\n<i>Копия сохранена в «Отправленные»</i>" if result.get("saved_to_sent") else ""
+        return (
+            "✅ <b>Отправлено</b>\n\n"
+            f"<b>Кому:</b> {escape_html(draft['to_addrs'])}\n"
+            f"<b>Тема:</b> {escape_html(draft['subject'] or '(без темы)')}"
+            f"{note}"
+        )
+
+    async def perform_send(self, chat_id: int, draft_id: int) -> dict:
+        """Отправляет черновик. Бросает SendError, если нельзя."""
+        draft = self.store.get_draft(draft_id)
+        if not draft or draft.get("chat_id") != chat_id:
+            raise SendError("Черновик не найден.")
+        if draft.get("status") != "pending":
+            raise SendError("Это письмо уже отправлено или отменено.")
+        if not self._send_rate_ok(chat_id):
+            raise SendError("Слишком много писем за час — попробуйте позже.")
+
+        result = await asyncio.to_thread(
+            send_email,
+            self.cfg,
+            [part.strip() for part in str(draft["to_addrs"]).split(",") if part.strip()],
+            draft["subject"] or "(без темы)",
+            draft["body"],
+            in_reply_to=draft.get("in_reply_to"),
+            references=draft.get("references_h"),
+        )
+        self.store.set_draft_status(draft_id, "sent")
+        self.send_history.setdefault(chat_id, []).append(monotonic())
+        return result
+
     async def _send_draft(self, callback: CallbackQuery, draft_id: int) -> None:
         message = callback.message
         chat_id = message.chat.id if message else None
-        draft = self.store.get_draft(draft_id)
-
-        if not draft or draft.get("chat_id") != chat_id:
-            await callback.answer("Черновик не найден", show_alert=True)
-            return
-        if draft.get("status") != "pending":
-            await callback.answer("Это письмо уже отправлено или отменено", show_alert=True)
-            return
-        if not self._send_rate_ok(chat_id):
-            await callback.answer("Слишком много писем за час", show_alert=True)
-            return
 
         await callback.answer("Отправляю…")
         if message:
@@ -571,19 +593,11 @@ class BotRunner:
                 pass
 
         try:
-            result = await asyncio.to_thread(
-                send_email,
-                self.cfg,
-                [part.strip() for part in str(draft["to_addrs"]).split(",") if part.strip()],
-                draft["subject"] or "(без темы)",
-                draft["body"],
-                in_reply_to=draft.get("in_reply_to"),
-                references=draft.get("references_h"),
-            )
+            result = await self.perform_send(chat_id, draft_id)
         except SendError as error:
             if message:
                 await message.edit_text(
-                    f"❌ <b>Не отправлено</b>\n\n{escape_html(str(error))}\n\nЧерновик сохранён — попробуйте ещё раз."
+                    f"❌ <b>Не отправлено</b>\n\n{escape_html(str(error))}\n\nПроверьте черновик и попробуйте ещё раз."
                 )
             await callback.answer(str(error)[:180], show_alert=True)
             return
@@ -593,17 +607,61 @@ class BotRunner:
                 await message.edit_text(f"❌ Не отправлено: {escape_html(str(error))}")
             return
 
-        self.store.set_draft_status(draft_id, "sent")
-        self.send_history.setdefault(chat_id, []).append(monotonic())
-
-        note = "\n\n<i>Копия сохранена в «Отправленные»</i>" if result.get("saved_to_sent") else ""
+        draft = self.store.get_draft(draft_id) or {}
         if message:
-            await message.edit_text(
-                "✅ <b>Отправлено</b>\n\n"
-                f"<b>Кому:</b> {escape_html(draft['to_addrs'])}\n"
-                f"<b>Тема:</b> {escape_html(draft['subject'] or '(без темы)')}"
-                f"{note}"
+            await message.edit_text(self._sent_text(draft, result))
+
+    async def start_freeform_send(self, chat_id: int, request: dict) -> None:
+        """Свободная форма: адрес + текст (+ слово «отправить» = сразу отправить)."""
+        if not getattr(self.cfg.mail, "send_enabled", True):
+            await self._send(chat_id, "Отправка писем отключена (<code>EMAIL_SEND_ENABLED=false</code>).")
+            return
+        if not self.cfg.has.mail:
+            await self._send(chat_id, "Почта не настроена — отправлять некуда.")
+            return
+        if not self._send_rate_ok(chat_id):
+            await self._send(chat_id, "⏳ Слишком много писем за час — попробуйте позже.")
+            return
+
+        instruction = request.get("instruction") or ""
+        await self.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        try:
+            draft = await compose_email(self.llm, self.cfg, self.store, instruction)
+        except ValueError as error:
+            await self._send(chat_id, f"✍️ {escape_html(str(error))}")
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.warning("freeform compose: %s", error)
+            await self._send(chat_id, f"✍️ Не смог собрать письмо: {escape_html(str(error))}")
+            return
+
+        draft_id = self.store.create_draft(
+            chat_id,
+            draft["to"],
+            draft["subject"] or "(без темы)",
+            draft["body"],
+            instruction=instruction,
+        )
+
+        if not request.get("auto_send"):
+            await self.show_draft(chat_id, draft_id)
+            return
+
+        try:
+            result = await self.perform_send(chat_id, draft_id)
+        except SendError as error:
+            await self._send(
+                chat_id,
+                f"❌ <b>Не отправлено</b>\n\n{escape_html(str(error))}\n\nПроверьте черновик:",
             )
+            await self.show_draft(chat_id, draft_id)
+            return
+        except Exception as error:  # noqa: BLE001
+            logger.warning("freeform send: %s", error)
+            await self._send(chat_id, f"❌ Не отправлено: {escape_html(str(error))}")
+            return
+
+        await self._send(chat_id, self._sent_text(draft, result))
 
     async def handle_text(self, message: Message) -> None:
         chat_id = message.chat.id
@@ -631,7 +689,13 @@ class BotRunner:
             elif route == "/more":
                 await self.show_hub(message.chat.id)
             return
-        await self.answer_question(message.chat.id, text)
+
+        send_request = detect_freeform_send(text)
+        if send_request:
+            await self.start_freeform_send(chat_id, send_request)
+            return
+
+        await self.answer_question(chat_id, text)
 
     async def show_hub(self, chat_id: int) -> None:
         await self._send(
