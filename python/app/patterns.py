@@ -401,6 +401,7 @@ def extract_asks(text, limit: int = 3) -> list[str]:
 PROMO_RE = re.compile(
     r"(скидк|распродаж|акци[яи]|промокод|clearance|black\s*friday|sale\b|discount|"
     r"поделитесь\s+впечатлением|оставьте\s+отзыв|подписк|дайджест|новости|"
+    r"подарок|бесплатно|бонус|бронирован|"
     r"−\s*\d+\s*%|-\s*\d+\s*%|\d+\s*%\s+на)",
     re.IGNORECASE,
 )
@@ -417,6 +418,10 @@ TRANSACTIONAL_RE = re.compile(
 
 def is_likely_bulk(from_address: str | None, subject: str | None) -> bool:
     """Маркетинг/рассылки — да; транзакционные уведомления (заказ, счёт, код) — нет."""
+    if not str(from_address or "").strip():
+        # Письмо без отправителя — почти всегда спам, сопоставить не с кем.
+        return True
+
     text = str(subject or "")
     local = str(from_address or "").lower().split("@")[0]
     transactional = bool(TRANSACTIONAL_RE.search(text))

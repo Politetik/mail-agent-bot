@@ -107,3 +107,7 @@ def test_bulk_detection():
     assert detect_bulk({}, "no-reply@shop.ru", "Поделитесь впечатлением") is True
     # обычная переписка
     assert detect_bulk({}, "ivan@romashka.ru", "Договор") is False
+    # письмо без отправителя — спам
+    assert detect_bulk({}, None, "99 процентов из 100 говорят") is True
+    # промо-подарок — реклама
+    assert detect_bulk({}, "info@quiz.ru", "Час фотографа в подарок") is True
